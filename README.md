@@ -1,6 +1,10 @@
 # cash-reconciliation-n8n
 AI-powered cash reconciliation workflow built with n8n
 
+![n8n](https://img.shields.io/badge/n8n-Automation-red)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+
 # Cash Reconciliation Automation (n8n)
 
 ## 🚀 Overview
