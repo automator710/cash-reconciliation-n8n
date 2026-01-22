@@ -1,0 +1,458 @@
+{
+  "name": "CashReconciliation",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "428a556e-ebf1-428c-859c-1efcfd4ab72b",
+      "name": "When clicking ‘Execute workflow’",
+      "type": "n8n-nodes-base.manualTrigger",
+      "position": [
+        1072,
+        320
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// n8n Code Node – Cash Reconciliation\n// ===============================\n\n// Input 0 → ERP Invoices\n// Input 1 → Bank Transactions\n\nconst erpLedger = items[0].json.erpLedger || [];\nconst bankLedger = items[1].json.bankLedger || [];\n\nconst matched = [];\nconst unmatchedInvoices = [];\nconst unmatchedBankTxns = [];\n\n// Helper: normalize amount\nconst normalizeAmount = (val) => Number(Number(val).toFixed(2));\n\n// Helper: extract invoice number from text\nconst extractInvoiceNumber = (text) => {\n  if (!text) return null;\n  const match = text.match(/\\b\\d+\\b/);\n  return match ? match[0] : null;\n};\n\n// Copy bank transactions so we can mark used ones\nconst remainingBankTxns = [...bankLedger];\n\n// -------------------------------\n// Reconciliation Logic\n// -------------------------------\nfor (const invoice of erpLedger) {\n  let bestMatch = null;\n  let bestScore = 0;\n\n  for (const txn of remainingBankTxns) {\n    let score = 0;\n\n    // 1️⃣ Amount match (strongest signal)\n    if (normalizeAmount(invoice.amount) === normalizeAmount(txn.amount)) {\n      score += 50;\n    }\n\n    // 2️⃣ Invoice number found in description\n    const extractedInv = extractInvoiceNumber(txn.description);\n    if (extractedInv && extractedInv === String(invoice.invoice_number)) {\n      score += 40;\n    }\n\n    // 3️⃣ Customer name appears in description\n    if (\n      invoice.CustomerName &&\n      txn.description &&\n      txn.description.toLowerCase().includes(invoice.CustomerName.toLowerCase())\n    ) {\n      score += 10;\n    }\n\n    if (score > bestScore) {\n      bestScore = score;\n      bestMatch = txn;\n    }\n  }\n\n  if (bestMatch && bestScore >= 70) {\n    matched.push({\n      invoice_id: invoice.id,\n      invoice_number: invoice.invoice_number,\n      customer: invoice.CustomerName,\n      invoice_amount: invoice.amount,\n      bank_amount: bestMatch.amount,\n      transaction_date: bestMatch.transaction_date,\n      reference: bestMatch.reference,\n      confidence_score: bestScore,\n      status: \"MATCHED\"\n    });\n\n    // remove matched txn\n    const idx = remainingBankTxns.indexOf(bestMatch);\n    if (idx !== -1) remainingBankTxns.splice(idx, 1);\n  } else {\n    unmatchedInvoices.push({\n      ...invoice,\n      status: \"UNMATCHED_INVOICE\",\n      reason: \"No confident bank transaction found\"\n    });\n  }\n}\n\n// Remaining bank transactions are unmatched\nfor (const txn of remainingBankTxns) {\n  unmatchedBankTxns.push({\n    ...txn,\n    status: \"UNMATCHED_BANK_TXN\",\n    reason: \"No matching invoice\"\n  });\n}\n\n// -------------------------------\n// Final Output\n// -------------------------------\nreturn [\n  {\n    json: {\n      summary: {\n        total_invoices: erpLedger.length,\n        total_bank_transactions: bankLedger.length,\n        matched: matched.length,\n        unmatched_invoices: unmatchedInvoices.length,\n        unmatched_bank_transactions: unmatchedBankTxns.length,\n        reconciliation_rate:\n          erpLedger.length === 0\n            ? 0\n            : Number(((matched.length / erpLedger.length) * 100).toFixed(2))\n      },\n      matched,\n      unmatchedInvoices,\n      unmatchedBankTransactions: unmatchedBankTxns\n    }\n  }\n];\n"
+      },
+      "id": "424a9ca9-fabd-4de8-871f-bf79cc7322ff",
+      "name": "Code in JavaScript",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        1520,
+        320
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        },
+        "options": {
+          "temperature": 0.8
+        }
+      },
+      "id": "a923c492-b692-4473-b96e-d15a18a01235",
+      "name": "OpenAI Chat Model1",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "position": [
+        3040,
+        544
+      ],
+      "typeVersion": 1.2,
+      "credentials": {
+        "openAiApi": {
+          "id": "N5u9vl3t3gNqUvcE",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Get raw string from OpenAI\nconst raw = $input.first().json.output;\n\n// 2. Parse JSON safely\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  throw new Error(\"OpenAI output is not valid JSON\");\n}\n\n// 3. Extract arrays safely\nconst transactions = parsed.parsed_bank_transactions || [];\nconst matches = parsed.matches || [];\nconst summary = parsed.summary || {};\n\n// 4. Convert transactions to iterable n8n items\nconst items = transactions.map(tx => ({\n  json: {\n    ...tx,\n    match_status: matches.find(m => m.bank_transaction_id === tx.transaction_id) || null\n  }\n}));\n\n// 5. Attach summary as last item\nitems.push({\n  json: {\n    type: \"summary\",\n    ...summary\n  }\n});\n\nreturn items;\n"
+      },
+      "id": "78f45a15-35dc-4982-8dc6-3e5817866f12",
+      "name": "Get Transaction, Matches, Summary",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        3392,
+        320
+      ],
+      "typeVersion": 2,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a cash reconciliation specialist.\n\nINPUT DATA:\n- Bank transactions (raw text): {{ $json.extractedText }}\n- ERP ledger entries (JSON): {{ JSON.stringify($('Code in JavaScript').item.json.erpLedger) }}\n\nTASKS\n1) Parse bank text into JSON rows with fields:\n   [{\"date\":\"YYYY-MM-DD\",\"description\":\"string\",\"amount\":number,\"currency\":\"string\",\"transaction_id\":\"string\"}]\n2) Match each bank transaction to one or more ERP entries (keys: exact amount, date ±2 days, reference similarity).\n3) Unmatched items: classify as \"unapplied\", \"suspense\", or \"needs_review\" with reasons.\n4) For partial/one-to-many matches, propose splits with allocation amounts.\n5) Provide a summary: total_txns, total_matched, total_unmatched, reconciliation_rate_pct.\n6) Add a confidence score (0–1) and a short reason for each match/split.\n\nCONSTRAINTS\n- Return JSON ONLY. No prose, no markdown.\n- Limit candidates to top 3 per transaction by confidence.\n- If best confidence < 0.6, treat as unmatched.\n- Use transaction_id and invoice numbers from the inputs.\n\nI want the output in Tabular format\n",
+        "hasOutputParser": true,
+        "options": {}
+      },
+      "id": "3d60f865-086d-4554-bec2-74df5c7c46db",
+      "name": "Process the Invoice Vs Bank Statement Data",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "position": [
+        3040,
+        320
+      ],
+      "typeVersion": 2.2
+    },
+    {
+      "parameters": {
+        "content": "## **Problem Statement**\n### Cash reconciliation is one of the most time-consuming and error-prone processes for Accounts Receivable teams. Every day, specialists need to take the bank statement, scan through hundreds of line items, and manually check which transactions correspond to outstanding invoices in the ERP system. This slows down the month-end close, creates a backlog of unapplied cash, and impacts visibility into actual cash flow.\n\n## **The challenge is twofold**\n\n### Volume & Complexity – Bank statements contain dozens of deposits, withdrawals, fees, and transfers. Invoices may partially match or differ slightly in timing/amounts, making manual matching tedious.\n### Accuracy & Speed – Missing a match means open invoices stay unresolved, while mis-matches lead to reconciliation errors and corrections later in accounting.",
+        "height": 272,
+        "width": 2080,
+        "color": 4
+      },
+      "id": "0954e576-67d2-42a7-a662-3cdf7a4d21ba",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        288,
+        -112
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "content": "## **Value**:\n\n### Time saved: Removes repetitive manual matching.\n### Cash flow visibility: Gives near real-time reconciliation metrics.\n### Error reduction: Uses AI confidence scoring and reasons for unmatched items.\n### Scalability: Can handle daily statement volumes without extra staff.",
+        "height": 288,
+        "width": 736,
+        "color": 6
+      },
+      "id": "5c07bc9a-59d2-46ef-a679-0dd8528cba32",
+      "name": "Sticky Note1",
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        288,
+        256
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "content": "## ***Input***:\n\n### Open invoices are loaded from Excel.\n### Daily bank statement is fetched from OneDrive.\n### OCR extracts transaction data from the statement.",
+        "height": 176,
+        "width": 1936,
+        "color": 4
+      },
+      "id": "54879b38-8de3-417f-8a2a-19b1f2c05c3d",
+      "name": "Sticky Note2",
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1056,
+        496
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "content": "## ***AI Processing***:\n\n### Both invoice data and bank transactions are passed into an OpenAI Chat model.\n### The model evaluates and returns:\n Transaction → Invoice matches\n Confidence scores\n Unmatched transactions with reasons\n Summary metrics (total matched, unmatched, reconciliation %).",
+        "height": 240,
+        "width": 784,
+        "color": 4
+      },
+      "id": "97d6d036-49a0-408e-ad5c-548ed54f50da",
+      "name": "Sticky Note3",
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        3184,
+        560
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "content": "## ***Post-Processing***:\n\n### Custom code nodes parse the AI output.\n### Results are converted into a structured table with columns like:\n\nBank Transaction Date\nDescription\nAmount\nERP Invoice Number(s)\nERP Customer Name(s)\nERP Amount(s)\nMatch Status\nConfidence Score\nReason\n\n## ***Output***:\n\n### The AR specialist sees a ready-made reconciliation table showing exactly which invoices can be closed in the ERP and which need further review. This reduces manual effort, improves reconciliation accuracy, and accelerates cash application.",
+        "height": 496,
+        "width": 1328,
+        "color": 4
+      },
+      "id": "8fe1348c-6460-4faf-9d86-0edb4bd8d89c",
+      "name": "Sticky Note4",
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1056,
+        688
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "content": "***Possible Enhancements***: \n\n1. Getting Invoice data from Data Table such as Snowflake, Databricks\n2. Getting Bank Statement from Bank accounts directly \n3. Posting the Data back to either ERP Systems or Data based with Matched Invoices to update the cash flow. ",
+        "height": 176,
+        "width": 704,
+        "color": 2
+      },
+      "id": "895e9156-d388-4994-affc-b4add34fea80",
+      "name": "Sticky Note5",
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        288,
+        592
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1QjSKC2c-UMSjCX0hYt-iAsDL2IgQ07BZUj0anyNz7_U",
+          "mode": "list",
+          "cachedResultName": "160 erp 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1QjSKC2c-UMSjCX0hYt-iAsDL2IgQ07BZUj0anyNz7_U/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1QjSKC2c-UMSjCX0hYt-iAsDL2IgQ07BZUj0anyNz7_U/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1280,
+        320
+      ],
+      "id": "dc092e88-9aca-4b77-abb7-54b779eb79af",
+      "name": "Get row(s) in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "5CuigCjpDRGOryMx",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "filters": {
+          "q": "has:attachment subject:(BANK STATEMENT)"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1744,
+        320
+      ],
+      "id": "dfb1a43f-cb6e-46d5-92e7-0ffae8e1e6fa",
+      "name": "get Bank Statement",
+      "webhookId": "97db89dd-98a5-437e-9bc0-2dafb53ee5cc",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "lo4WN1j445knLJap",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{$json.id}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1952,
+        320
+      ],
+      "id": "3a2f88f7-9ea0-4452-88c7-3b05be50c117",
+      "name": "HTTP Request",
+      "credentials": {
+        "oAuth2Api": {
+          "id": "VHCcKIDHTuxXvvl5",
+          "name": "Unnamed credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const parts = items[0].json.payload.parts || [];\n\nconst attachments = parts\n  .filter(p => p.filename && p.body && p.body.attachmentId)\n  .map(p => ({\n    json: {\n      attachmentId: p.body.attachmentId,\n      filename: p.filename,\n      mimeType: p.mimeType,\n      messageId: items[0].json.id\n    }\n  }));\n\nreturn attachments;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        320
+      ],
+      "id": "96c77060-aef6-4f1d-b4f9-b891a4ce4f60",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{$json.messageId}}/attachments/{{$json.attachmentId}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2368,
+        320
+      ],
+      "id": "8f1191ff-e726-4330-9d02-a52b5559626a",
+      "name": "HTTP Request1",
+      "credentials": {
+        "oAuth2Api": {
+          "id": "VHCcKIDHTuxXvvl5",
+          "name": "Unnamed credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = items[0];\n\nitem.binary = {\n  Data: {\n    data: item.json.data, // <-- CORRECT SOURCE\n    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',\n    fileName: 'bank_statement.xlsx',\n  },\n};\n\n// Optional but clean\ndelete item.json;\n\nreturn [item];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2576,
+        320
+      ],
+      "id": "8ca33920-800c-4bf0-95f6-8a2352d70001",
+      "name": "Code in JavaScript2"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "Data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        2784,
+        320
+      ],
+      "id": "9ea4be34-c9d2-47f0-83c0-9bbca03f6c85",
+      "name": "Extract from File"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "get Bank Statement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Process the Invoice Vs Bank Statement Data",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Get row(s) in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process the Invoice Vs Bank Statement Data": {
+      "main": [
+        [
+          {
+            "node": "Get Transaction, Matches, Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s) in sheet": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get Bank Statement": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript2": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Process the Invoice Vs Bank Statement Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "2c18464b-f8b1-4a1c-9298-fd90ba32b176",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "11c260cad233417c6e109416d9afe999f81a5873d757c317cc6e00c2000fab92"
+  },
+  "id": "ZHZH0qt6Jd3YGeZOBarzm",
+  "tags": []
+}
